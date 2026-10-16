@@ -1313,7 +1313,7 @@ namespace Cpu {
 		return watts;
 	}
 
-    static constexpr auto to_int(std::string_view view) {
+    static inline auto to_int(std::string_view view) {
         std::uint32_t value {};
         std::from_chars(view.data(), view.data() + view.size(), value);
         return value;
@@ -3815,7 +3815,7 @@ namespace Proc {
 				}
 
 				//? Process cpu usage since last update
-				new_proc.cpu_p = clamp(round(cmult * 1000.0 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);
+				new_proc.cpu_p = clamp(round(cmult * 1000.0 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * (per_core ? (double)Shared::coreCount : 1.0));
 
 				//? Process cumulative cpu usage since process start
 				new_proc.cpu_c = (double)cpu_t / max(1.0, (uptime * Shared::clkTck) - new_proc.cpu_s);
