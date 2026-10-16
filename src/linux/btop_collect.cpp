@@ -32,6 +32,7 @@ tab-size = 4
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <sstream>
 
 #include <arpa/inet.h> // for inet_ntop()
 #include <dlfcn.h>
@@ -138,6 +139,238 @@ struct join_thread
 
 };
 
+}
+
+// User cgroup & seedbox quota support
+namespace UserCgroup {
+	static int cached_uid = -1;
+	static std::string cgroup_mem_path;
+	static std::string cgroup_cpu_path;
+	static bool checked = false;
+	static bool available = false;
+	static uint64_t last_cpu_usage = 0;
+	static uint64_t last_cpu_time = 0;
+
+	static double parse_json_number(const std::string& json, const std::string& key) {
+		std::string needle = "\"" + key + "\"";
+		size_t pos = json.find(needle);
+		if (pos == std::string::npos) return -1.0;
+		pos += needle.size();
+		while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == ':')) pos++;
+		if (pos >= json.size()) return -1.0;
+		if (json[pos] == '\"') pos++;
+		try {
+			size_t processed = 0;
+			return std::stod(json.substr(pos), &processed);
+		} catch (...) {
+			return -1.0;
+		}
+	}
+
+	static void init() {
+		if (checked) return;
+		checked = true;
+		cached_uid = (int)getuid();
+		if (cached_uid == 0) return;
+		std::string uid_str = std::to_string(cached_uid);
+
+		std::string mem_v1 = "/sys/fs/cgroup/memory/user.slice/user-" + uid_str + ".slice";
+		std::string cpu_v1 = "/sys/fs/cgroup/cpu,cpuacct/user.slice/user-" + uid_str + ".slice";
+		if (fs::exists(mem_v1 + "/memory.limit_in_bytes")) {
+			cgroup_mem_path = mem_v1;
+			available = true;
+		}
+		if (fs::exists(cpu_v1 + "/cpu.cfs_quota_us")) {
+			cgroup_cpu_path = cpu_v1;
+			available = true;
+		}
+		std::string v2 = "/sys/fs/cgroup/user.slice/user-" + uid_str + ".slice";
+		if (cgroup_mem_path.empty() && fs::exists(v2 + "/memory.max")) {
+			cgroup_mem_path = v2;
+			available = true;
+		}
+		if (cgroup_cpu_path.empty() && fs::exists(v2 + "/cpu.max")) {
+			cgroup_cpu_path = v2;
+			available = true;
+		}
+	}
+
+	static uint64_t get_mem_limit() {
+		init();
+		const char* home = getenv("HOME");
+		if (home) {
+			std::string jpath = std::string(home) + "/.config/pmss-user.json";
+			std::ifstream jfile(jpath);
+			if (jfile.good()) {
+				std::string jcontent((std::istreambuf_iterator<char>(jfile)), std::istreambuf_iterator<char>());
+				double ram_mib = parse_json_number(jcontent, "ramMiB");
+				if (ram_mib > 0) return (uint64_t)(ram_mib * 1024ULL * 1024ULL);
+			}
+		}
+
+		if (!available || cgroup_mem_path.empty()) return 0;
+		std::ifstream f(cgroup_mem_path + "/memory.limit_in_bytes");
+		uint64_t lim = 0;
+		if (f >> lim && lim > 0 && lim < 9000000000000000000ULL) {
+			return lim;
+		}
+		std::ifstream f2(cgroup_mem_path + "/memory.max");
+		std::string s;
+		if (f2 >> s && s != "max") {
+			try { return std::stoull(s); } catch(...) {}
+		}
+		return 0;
+	}
+
+	static uint64_t get_mem_used() {
+		init();
+		if (!available || cgroup_mem_path.empty()) return 0;
+		std::ifstream f(cgroup_mem_path + "/memory.usage_in_bytes");
+		uint64_t u = 0;
+		if (f >> u) return u;
+		std::ifstream f2(cgroup_mem_path + "/memory.current");
+		if (f2 >> u) return u;
+		return 0;
+	}
+
+	static void get_mem_stat(uint64_t& rss, uint64_t& cache, uint64_t& swap) {
+		init();
+		rss = 0; cache = 0; swap = 0;
+		if (!available || cgroup_mem_path.empty()) return;
+		std::ifstream f(cgroup_mem_path + "/memory.stat");
+		std::string key;
+		uint64_t val = 0;
+		while (f >> key >> val) {
+			if (key == "total_rss" || key == "anon") rss = val;
+			else if (key == "total_cache" || key == "file") cache = val;
+			else if (key == "total_swap" || key == "swap") swap = val;
+		}
+	}
+
+	static double get_cpu_cores() {
+		init();
+		const char* home = getenv("HOME");
+		if (home) {
+			std::string jpath = std::string(home) + "/.config/pmss-user.json";
+			std::ifstream jfile(jpath);
+			if (jfile.good()) {
+				std::string jcontent((std::istreambuf_iterator<char>(jfile)), std::istreambuf_iterator<char>());
+				double pct = parse_json_number(jcontent, "cpuQuotaPercent");
+				if (pct > 0) return pct / 100.0;
+			}
+		}
+
+		if (!available || cgroup_cpu_path.empty()) return 1.0;
+		int64_t quota = 0, period = 100000;
+		std::ifstream fq(cgroup_cpu_path + "/cpu.cfs_quota_us");
+		if (fq >> quota && quota > 0) {
+			std::ifstream fp(cgroup_cpu_path + "/cpu.cfs_period_us");
+			if (fp >> period && period > 0) {
+				return (double)quota / period;
+			}
+		}
+		std::ifstream fv2(cgroup_cpu_path + "/cpu.max");
+		std::string sq;
+		if (fv2 >> sq >> period && sq != "max") {
+			try {
+				quota = std::stoll(sq);
+				if (quota > 0 && period > 0) return (double)quota / period;
+			} catch (...) {}
+		}
+		return 1.0;
+	}
+
+	static int get_allocated_cores() {
+		double cores = get_cpu_cores();
+		return std::max(1, (int)std::round(cores));
+	}
+
+	static bool get_cpu_usage(long long& out_cpu_percent, double& out_raw_percent) {
+		init();
+		if (!available || cgroup_cpu_path.empty()) return false;
+		double cores = get_cpu_cores();
+
+		uint64_t cur_usage = 0;
+		std::ifstream fu(cgroup_cpu_path + "/cpuacct.usage");
+		if (!(fu >> cur_usage)) {
+			std::ifstream fv2u(cgroup_cpu_path + "/cpu.stat");
+			std::string k; uint64_t v;
+			while (fv2u >> k >> v) {
+				if (k == "usage_usec") { cur_usage = v * 1000ULL; break; }
+			}
+		}
+
+		uint64_t cur_time = Tools::time_micros();
+		if (last_cpu_time > 0 && cur_usage >= last_cpu_usage && cur_time > last_cpu_time) {
+			uint64_t d_usage = cur_usage - last_cpu_usage;
+			uint64_t d_time_ns = (cur_time - last_cpu_time) * 1000ULL;
+			if (d_time_ns > 0) {
+				out_raw_percent = ((double)d_usage / d_time_ns) * 100.0;
+				double rel_pct = (cores > 0) ? (out_raw_percent / cores) : out_raw_percent;
+				out_cpu_percent = (long long)std::round(std::clamp(rel_pct, 0.0, 100.0));
+			}
+		}
+		last_cpu_usage = cur_usage;
+		last_cpu_time = cur_time;
+		return true;
+	}
+
+	static uint64_t parse_quota_size(const std::string& s) {
+		if (s.empty()) return 0;
+		size_t idx = 0;
+		double val = 0.0;
+		try { val = std::stod(s, &idx); } catch (...) { return 0; }
+		uint64_t mult = 1024ULL;
+		if (idx < s.size()) {
+			char u = std::toupper(s[idx]);
+			if (u == 'B') mult = 1ULL;
+			else if (u == 'K') mult = 1024ULL;
+			else if (u == 'M') mult = 1024ULL * 1024ULL;
+			else if (u == 'G') mult = 1024ULL * 1024ULL * 1024ULL;
+			else if (u == 'T') mult = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+			else if (u == 'P') mult = 1024ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+		}
+		return static_cast<uint64_t>(val * mult);
+	}
+
+	static bool get_disk_quota(uint64_t& out_total, uint64_t& out_used, uint64_t& out_free) {
+		const char* home = getenv("HOME");
+		if (!home) return false;
+		std::string qpath = std::string(home) + "/.quota";
+		std::ifstream qfile(qpath);
+		if (qfile.good()) {
+			std::string line;
+			while (std::getline(qfile, line)) {
+				size_t first_non_space = line.find_first_not_of(" \t");
+				if (first_non_space != std::string::npos && line.compare(first_non_space, 5, "/dev/") == 0) {
+					std::stringstream ss(line.substr(first_non_space));
+					std::string dev, used_str, quota_str, limit_str;
+					if (ss >> dev >> used_str >> quota_str >> limit_str) {
+						out_used = parse_quota_size(used_str);
+						out_total = parse_quota_size(quota_str);
+						if (out_total == 0) out_total = parse_quota_size(limit_str);
+						if (out_total > 0) {
+							out_free = (out_total > out_used) ? (out_total - out_used) : 0;
+							return true;
+						}
+					}
+				}
+			}
+		}
+
+		std::string jpath = std::string(home) + "/.config/pmss-user.json";
+		std::ifstream jfile(jpath);
+		if (jfile.good()) {
+			std::string jcontent((std::istreambuf_iterator<char>(jfile)), std::istreambuf_iterator<char>());
+			double q_gib = parse_json_number(jcontent, "quota");
+			if (q_gib > 0) {
+				out_total = (uint64_t)(q_gib * 1024ULL * 1024ULL * 1024ULL);
+				out_free = out_total;
+				return true;
+			}
+		}
+		return false;
+	}
 }
 
 namespace Cpu {
@@ -329,7 +562,7 @@ namespace Mem {
 namespace Shared {
 
 	fs::path procPath, passwd_path;
-	long pageSize, clkTck, coreCount;
+	long pageSize, clkTck, coreCount, hostCoreCount;
 
 	void init() {
 
@@ -342,13 +575,18 @@ namespace Shared {
 		if (passwd_path.empty())
 			Logger::warning("Could not read /etc/passwd, will show UID instead of username.");
 
-		coreCount = sysconf(_SC_NPROCESSORS_ONLN);
-		if (coreCount < 1) {
-			coreCount = sysconf(_SC_NPROCESSORS_CONF);
-			if (coreCount < 1) {
-				coreCount = 1;
+		hostCoreCount = sysconf(_SC_NPROCESSORS_ONLN);
+		if (hostCoreCount < 1) {
+			hostCoreCount = sysconf(_SC_NPROCESSORS_CONF);
+			if (hostCoreCount < 1) {
+				hostCoreCount = 1;
 				Logger::warning("Could not determine number of cores, defaulting to 1.");
 			}
+		}
+		coreCount = hostCoreCount;
+		if (Config::getB("user_mode")) {
+			int alloc = UserCgroup::get_allocated_cores();
+			if (alloc > 0) coreCount = alloc;
 		}
 
 		pageSize = sysconf(_SC_PAGE_SIZE);
@@ -485,6 +723,10 @@ namespace Cpu {
 			}
 
 			name = trim_name(name);
+		}
+
+		if (Config::getB("user_mode")) {
+			name += " (" + std::to_string(Shared::coreCount) + " Cores Quota)";
 		}
 
 		return name;
@@ -1078,6 +1320,12 @@ namespace Cpu {
     }
 
     static auto detect_active_cpus() -> std::vector<std::int32_t> {
+        if (Config::getB("user_mode")) {
+            auto result = std::vector<std::int32_t>(Shared::coreCount);
+            std::iota(result.begin(), result.end(), 0);
+            return result;
+        }
+
         auto stream = std::ifstream { "/sys/fs/cgroup/cpuset.cpus.effective" };
         auto buf = std::string { std::istreambuf_iterator<char> { stream }, {} };
 
@@ -1126,6 +1374,9 @@ namespace Cpu {
 			int i = 0;
 			int target = Shared::coreCount;
 			for (; i <= target or (cread.good() and cread.peek() == 'c'); i++) {
+				if (Config::getB("user_mode") and i > Shared::coreCount) {
+					break;
+				}
 				//? Make sure to add zero value for missing core values if at end of file
 				if ((not cread.good() or cread.peek() != 'c') and i <= target) {
 					if (i == 0) throw std::runtime_error("Failed to parse /proc/stat");
@@ -1223,7 +1474,7 @@ namespace Cpu {
 			}
 
 			//? Notify main thread to redraw screen if we found more cores than previously detected
-			if (cmp_greater(cpu.core_percent.size(), Shared::coreCount)) {
+			if (not Config::getB("user_mode") and cmp_greater(cpu.core_percent.size(), Shared::coreCount)) {
 				Logger::debug("Changing CPU max corecount from {} to {}.", Shared::coreCount, cpu.core_percent.size());
 				Runner::coreNum_reset = true;
 				Shared::coreCount = cpu.core_percent.size();
@@ -1235,6 +1486,22 @@ namespace Cpu {
 			Logger::debug("Cpu::collect() : {}", e.what());
 			if (cread.bad()) throw std::runtime_error("Failed to read /proc/stat");
 			else throw std::runtime_error(fmt::format("Cpu::collect() : {}", e.what()));
+		}
+
+		if (Config::getB("user_mode")) {
+			long long u_pct = 0;
+			double raw_pct = 0.0;
+			if (UserCgroup::get_cpu_usage(u_pct, raw_pct)) {
+				if (!cpu.cpu_percent.at("total").empty()) {
+					cpu.cpu_percent.at("total").back() = u_pct;
+				}
+				double per_c = raw_pct / std::max(1L, Shared::coreCount);
+				for (int ci = 0; ci < Shared::coreCount && ci < (int)cpu.core_percent.size(); ci++) {
+					if (!cpu.core_percent[ci].empty()) {
+						cpu.core_percent[ci].back() = std::clamp((long long)std::round(per_c), 0ll, 100ll);
+					}
+				}
+			}
 		}
 
 		if (Config::getB("check_temp") and got_sensors)
@@ -2322,6 +2589,11 @@ namespace Mem {
 	mem_info current_mem {};
 
 	uint64_t get_totalMem() {
+		if (Config::getB("user_mode")) {
+			uint64_t u_lim = UserCgroup::get_mem_limit();
+			if (u_lim > 0) return u_lim;
+		}
+
 		ifstream meminfo(Shared::procPath / "meminfo");
 		int64_t totalMem = 0;
 		if (meminfo.good()) {
@@ -2409,6 +2681,27 @@ namespace Mem {
 			throw std::runtime_error("Failed to read /proc/meminfo");
 
 		meminfo.close();
+
+		if (Config::getB("user_mode")) {
+			uint64_t u_used = UserCgroup::get_mem_used();
+			uint64_t u_rss = 0, u_cache = 0, u_swap = 0;
+			UserCgroup::get_mem_stat(u_rss, u_cache, u_swap);
+			if (u_used > 0 || u_rss > 0) {
+				if (u_used == 0) u_used = u_rss + u_cache;
+				u_used = std::min(u_used, totalMem);
+				mem.stats.at("used") = u_used;
+				mem.stats.at("cached") = u_cache;
+				mem.stats.at("free") = (totalMem > u_used) ? (totalMem - u_used) : 0;
+				mem.stats.at("available") = mem.stats.at("free");
+				if (u_swap > 0) mem.stats.at("swap_used") = u_swap;
+			} else {
+				if (mem.stats.at("used") > totalMem) {
+					mem.stats.at("used") = (totalMem > mem.stats.at("free")) ? (totalMem - mem.stats.at("free")) : 0;
+				}
+				mem.stats.at("free") = (totalMem > mem.stats.at("used")) ? (totalMem - mem.stats.at("used")) : 0;
+				mem.stats.at("available") = mem.stats.at("free");
+			}
+		}
 
 		//? Calculate percentages
 		for (const auto& name : mem_names) {
@@ -2631,6 +2924,24 @@ namespace Mem {
 					++it;
 				}
 
+				if (Config::getB("user_mode")) {
+					uint64_t q_tot = 0, q_used = 0, q_free = 0;
+					if (UserCgroup::get_disk_quota(q_tot, q_used, q_free)) {
+						string target_mount = disks.contains("/home") ? "/home" : (disks.contains("/") ? "/" : "");
+						if (!target_mount.empty()) {
+							auto& d = disks.at(target_mount);
+							d.total = q_tot;
+							d.used = q_used;
+							d.free = q_free;
+							if (d.total > 0) {
+								d.used_percent = round((double)d.used * 100 / d.total);
+								d.free_percent = 100 - d.used_percent;
+							}
+							d.name = (target_mount == "/home") ? "home (quota)" : "root (quota)";
+						}
+					}
+				}
+
 				//? Setup disks order in UI and add swap if enabled
 				mem.disks_order.clear();
 				#ifdef SNAPPED
@@ -2653,6 +2964,14 @@ namespace Mem {
 					#else
 						if (not is_in(name, "/", "swap")) mem.disks_order.push_back(name);
 					#endif
+
+				if (Config::getB("user_mode") and disks.contains("/home")) {
+					auto it_home = rng::find(mem.disks_order, "/home");
+					if (it_home != mem.disks_order.end()) {
+						mem.disks_order.erase(it_home);
+						mem.disks_order.insert(mem.disks_order.begin(), "/home");
+					}
+				}
 
 				//? Get disks IO
 				int64_t sectors_read, sectors_write, io_ticks, io_ticks_temp;
@@ -3234,12 +3553,13 @@ namespace Proc {
 
 		static vector<size_t> found;
 
-		const double uptime = system_uptime();
-
-		const int cmult = (per_core) ? Shared::coreCount : 1;
+		const double cmult = (Config::getB("user_mode"))
+			? ((per_core) ? (double)Shared::hostCoreCount : ((double)Shared::hostCoreCount / std::max(1L, Shared::coreCount)))
+			: ((per_core) ? (double)Shared::coreCount : 1.0);
 		bool got_detailed = false;
 
 		static size_t proc_clear_count{};
+		static std::unordered_set<size_t> non_user_procs;
 
 		//* Use pids from last update if only changing filter, sorting or tree options
 		if (no_update and not current_procs.empty()) {
@@ -3257,6 +3577,9 @@ namespace Proc {
 				kernels_procs.clear();
 				kernels_procs.emplace(KTHREADD);
 				proc_clear_count = 0;
+			}
+			if (Config::getB("user_mode") and proc_clear_count == 0) {
+				non_user_procs.clear();
 			}
 
 			auto totalMem = Mem::get_totalMem();
@@ -3310,6 +3633,9 @@ namespace Proc {
 				if (should_filter_kernel and kernels_procs.contains(pid)) {
 					continue;
 				}
+				if (Config::getB("user_mode") and non_user_procs.contains(pid)) {
+					continue;
+				}
 
 				found.push_back(pid);
 
@@ -3351,6 +3677,18 @@ namespace Proc {
 					pread.close();
 					if (not new_proc.cmd.empty()) new_proc.cmd.pop_back();
 
+					if (new_proc.name == "dotnet" or new_proc.name == "mono" or new_proc.name == "python" or new_proc.name == "python3") {
+						string cmd_lower = new_proc.cmd;
+						std::transform(cmd_lower.begin(), cmd_lower.end(), cmd_lower.begin(), ::tolower);
+						for (const auto& svc : {"jellyfin", "radarr", "sonarr", "prowlarr", "lidarr", "readarr", "bazarr", "jackett", "qbittorrent", "rtorrent", "deluge"}) {
+							if (cmd_lower.find(svc) != string::npos) {
+								new_proc.name = svc;
+								new_proc.name_offset = 0;
+								break;
+							}
+						}
+					}
+
 					pread.open(d.path() / "status");
 					if (not pread.good()) continue;
 					string uid;
@@ -3366,6 +3704,16 @@ namespace Proc {
 						}
 					}
 					pread.close();
+					if (Config::getB("user_mode") and not uid.empty()) {
+						try {
+							if (std::stoi(uid) != (int)getuid()) {
+								non_user_procs.insert(pid);
+								found.pop_back();
+								current_procs.pop_back();
+								continue;
+							}
+						} catch (...) {}
+					}
 					if (uid_user.contains(uid)) {
 						new_proc.user = uid_user.at(uid);
 					}
@@ -3467,7 +3815,7 @@ namespace Proc {
 				}
 
 				//? Process cpu usage since last update
-				new_proc.cpu_p = clamp(round(cmult * 1000 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);
+				new_proc.cpu_p = clamp(round(cmult * 1000.0 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);
 
 				//? Process cumulative cpu usage since process start
 				new_proc.cpu_c = (double)cpu_t / max(1.0, (uptime * Shared::clkTck) - new_proc.cpu_s);
