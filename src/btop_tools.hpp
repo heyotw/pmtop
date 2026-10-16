@@ -1,3 +1,4 @@
+// hny.sh likes to code //
 /* Copyright 2021 Aristocratos (jakob@qvantnet.com)
 
    Licensed under the Apache License, Version 2.0 (the "License");
@@ -291,9 +292,18 @@ namespace Tools {
 	}
 
 	//* Split <string> at all occurrences of <delim> and return as vector of strings
-	constexpr auto ssplit(std::string_view str, char delim = ' ') {
-		return str | std::views::split(delim) | std::views::filter([](auto&& range) { return !std::ranges::empty(range); }) |
-			   std::ranges::to<std::vector<std::string>>();
+	inline auto ssplit(std::string_view str, char delim = ' ') -> std::vector<std::string> {
+		std::vector<std::string> result;
+		size_t start = 0;
+		while (start < str.size()) {
+			size_t end = str.find(delim, start);
+			if (end == std::string_view::npos) end = str.size();
+			if (end > start) {
+				result.emplace_back(str.substr(start, end - start));
+			}
+			start = end + 1;
+		}
+		return result;
 	}
 
 	//* Put current thread to sleep for <ms> milliseconds
