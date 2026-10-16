@@ -1,3 +1,4 @@
+// hny.sh likes to code //
 /* Copyright 2021 Aristocratos (jakob@qvantnet.com)
 
    Licensed under the Apache License, Version 2.0 (the "License");
@@ -1076,20 +1077,21 @@ namespace Cpu {
         return value;
     }
 
-    static constexpr auto detect_active_cpus() {
+    static auto detect_active_cpus() -> std::vector<std::int32_t> {
         auto stream = std::ifstream { "/sys/fs/cgroup/cpuset.cpus.effective" };
         auto buf = std::string { std::istreambuf_iterator<char> { stream }, {} };
 
         if (buf.empty()) {
-            return std::views::iota(0, Shared::coreCount) | std::ranges::to<std::vector<std::int32_t>>();
+            auto result = std::vector<std::int32_t>(Shared::coreCount);
+            std::iota(result.begin(), result.end(), 0);
+            return result;
         }
 
-        return buf | std::views::split(',') | std::views::transform([](auto&& range) -> auto {
+        auto active_cpus = buf | std::views::split(',') | std::views::transform([](auto&& range) -> auto {
                    auto view = std::string_view { range };
                    auto dash = view.find('-');
 
                    if (dash == std::string_view::npos) {
-                       // Single CPU, return iota of single element
                        auto value = to_int(view);
                        return std::views::iota(value, value + 1);
                    }
@@ -1098,7 +1100,10 @@ namespace Cpu {
                    auto end = to_int(view.substr(dash + 1));
                    return std::views::iota(start, end + 1);
                }) |
-               std::views::join | std::ranges::to<std::vector<std::int32_t>>();
+               std::views::join;
+        auto result = std::vector<std::int32_t> {};
+        std::ranges::copy(active_cpus, std::back_inserter(result));
+        return result;
     }
 
 	auto collect(bool no_update) -> cpu_info& {
