@@ -1,3 +1,4 @@
+// hny.sh likes to code //
 /* Copyright 2021 Aristocratos (jakob@qvantnet.com)
 
    Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,6 +74,9 @@ namespace Config {
 	bool write_new;
 
 	const vector<array<string, 2>> descriptions = {
+		{"user_mode", 			"#* Scope monitoring to current user cgroup quotas (CPU CFS, RAM limit, user procs, quota disk).\n"
+								"#* Ideal for unprivileged seedboxes, shared hosts, and multi-tenant VPS."},
+
 		{"color_theme", 		"#* Name of a btop++/bpytop/bashtop formatted \".theme\" file, \"Default\" and \"TTY\" for builtin themes.\n"
 								"#* Themes should be placed in \"../share/btop/themes\" relative to binary or \"$HOME/.config/btop/themes\""},
 
@@ -361,6 +365,7 @@ namespace Config {
 		{"force_tty", false},
 		{"lowcolor", false},
 		{"show_detailed", false},
+		{"user_mode", true},
 		{"proc_filtering", false},
 		{"proc_aggregate", false},
 		{"pause_proc_list", false},
@@ -406,12 +411,16 @@ namespace Config {
 			std::error_code error;
 			if (const auto xdg_config_home = std::getenv("XDG_CONFIG_HOME"); xdg_config_home != nullptr) {
 				if (fs::exists(xdg_config_home, error)) {
-					config_dir = fs::path(xdg_config_home) / "btop";
+					auto p1 = fs::path(xdg_config_home) / "pmtop";
+					auto p2 = fs::path(xdg_config_home) / "btop";
+					config_dir = fs::exists(p1, error) ? p1 : (fs::exists(p2, error) ? p2 : p1);
 				}
 			} else if (const auto home = std::getenv("HOME"); home != nullptr) {
 				error.clear();
 				if (fs::exists(home, error)) {
-					config_dir = fs::path(home) / ".config" / "btop";
+					auto p1 = fs::path(home) / ".config" / "pmtop";
+					auto p2 = fs::path(home) / ".config" / "btop";
+					config_dir = fs::exists(p1, error) ? p1 : (fs::exists(p2, error) ? p2 : p1);
 				}
 				if (error) {
 					fmt::print(stderr, "\033[0;31mWarning: \033[0m{} could not be accessed: {}\n", config_dir.string(), error.message());

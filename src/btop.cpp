@@ -1,3 +1,4 @@
+// hny.sh likes to code //
 /* Copyright 2021 Aristocratos (jakob@qvantnet.com)
 
    Licensed under the Apache License, Version 2.0 (the "License");
@@ -866,7 +867,14 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 			Config::conf_file = cli.config_file.value();
 		} else if (config_dir.has_value()) {
 			Config::conf_dir = config_dir.value();
-			Config::conf_file = Config::conf_dir / "btop.conf";
+			std::error_code ec;
+			if (fs::exists(Config::conf_dir / "pmtop.conf", ec)) {
+				Config::conf_file = Config::conf_dir / "pmtop.conf";
+			} else if (fs::exists(Config::conf_dir / "btop.conf", ec)) {
+				Config::conf_file = Config::conf_dir / "btop.conf";
+			} else {
+				Config::conf_file = Config::conf_dir / "pmtop.conf";
+			}
 
 			auto log_file = Config::get_log_file();
 			if (log_file.has_value()) {
