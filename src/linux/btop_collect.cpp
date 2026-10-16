@@ -3553,6 +3553,7 @@ namespace Proc {
 
 		static vector<size_t> found;
 
+		const double uptime = system_uptime();
 		const double cmult = (Config::getB("user_mode"))
 			? ((per_core) ? (double)Shared::hostCoreCount : ((double)Shared::hostCoreCount / std::max(1L, Shared::coreCount)))
 			: ((per_core) ? (double)Shared::coreCount : 1.0);
