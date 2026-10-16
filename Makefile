@@ -1,3 +1,4 @@
+# hny.sh likes to code #
 #* Btop++ makefile
 
 MAKEFILE_VERSION = 1.6
@@ -361,13 +362,14 @@ distclean: clean
 	@test -e lib/rocm_smi_lib/build && rm -rf lib/rocm_smi_lib/build || true
 
 install:
-	@$(call green,Installing binary to: $(WHITE)$(DESTDIR)$(PREFIX)/bin/btop)
+	@$(call green,Installing binary to: $(WHITE)$(DESTDIR)$(PREFIX)/bin/pmtop)
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
-	@cp -p $(TARGETDIR)/btop $(DESTDIR)$(PREFIX)/bin/btop
-	@chmod 755 $(DESTDIR)$(PREFIX)/bin/btop
-	@$(call green,Installing doc to: $(WHITE)$(DESTDIR)$(PREFIX)/share/doc/btop)
-	@mkdir -p $(DESTDIR)$(PREFIX)/share/doc/btop
-	@cp -p README.md $(DESTDIR)$(PREFIX)/share/doc/btop
+	@cp -p $(TARGETDIR)/pmtop $(DESTDIR)$(PREFIX)/bin/pmtop
+	@chmod 755 $(DESTDIR)$(PREFIX)/bin/pmtop
+	@ln -sf pmtop $(DESTDIR)$(PREFIX)/bin/btop
+	@$(call green,Installing doc to: $(WHITE)$(DESTDIR)$(PREFIX)/share/doc/pmtop)
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/doc/pmtop
+	@cp -p README.md $(DESTDIR)$(PREFIX)/share/doc/pmtop
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/btop
 	@$(call green,Installing themes to: $(WHITE)$(DESTDIR)$(PREFIX)/share/btop/themes)
 	@cp -pr themes $(DESTDIR)$(PREFIX)/share/btop
@@ -388,22 +390,24 @@ endif
 
 #? Set SUID bit for btop as $SU_USER in $SU_GROUP
 setuid:
-	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/btop)
+	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/pmtop)
 	@$(call green,Setting owner ,$(WHITE)$(SU_USER):$(SU_GROUP))
-	@chown $(SU_USER):$(SU_GROUP) $(DESTDIR)$(PREFIX)/bin/btop
+	@chown $(SU_USER):$(SU_GROUP) $(DESTDIR)$(PREFIX)/bin/pmtop
 	@$(call green,Setting SUID bit)
-	@chmod u+s $(DESTDIR)$(PREFIX)/bin/btop
+	@chmod u+s $(DESTDIR)$(PREFIX)/bin/pmtop
 
 #? Run setcap on btop for extended capabilities
 setcap:
-	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/btop)
+	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/pmtop)
 	@$(call green,Setting capabilities,...)
-	@setcap "cap_perfmon=+ep cap_dac_read_search=+ep" $(DESTDIR)$(PREFIX)/bin/btop
+	@setcap "cap_perfmon=+ep cap_dac_read_search=+ep" $(DESTDIR)$(PREFIX)/bin/pmtop
 
 # With 'rm -v' user will see what files (if any) got removed
 uninstall:
-	@$(call red,Removing: ,$(WHITE)$(DESTDIR)$(PREFIX)/bin/btop)
-	@rm -rfv $(DESTDIR)$(PREFIX)/bin/btop
+	@$(call red,Removing: ,$(WHITE)$(DESTDIR)$(PREFIX)/bin/pmtop)
+	@rm -rfv $(DESTDIR)$(PREFIX)/bin/pmtop $(DESTDIR)$(PREFIX)/bin/btop
+	@$(call red,Removing: ,$(WHITE)$(DESTDIR)$(PREFIX)/share/pmtop)
+	@rm -rfv $(DESTDIR)$(PREFIX)/share/pmtop
 	@$(call red,Removing: ,$(WHITE)$(DESTDIR)$(PREFIX)/share/btop)
 	@rm -rfv $(DESTDIR)$(PREFIX)/share/btop
 	@$(call red,Removing: ,$(WHITE)$(DESTDIR)$(PREFIX)/share/applications/btop.desktop)
@@ -455,10 +459,13 @@ btop: $(OBJECTS) | rocm_smi directories
 	@sleep 0.2 2>/dev/null || true
 	@TSTAMP=$$(date +%s 2>/dev/null || echo "0")
 	@$(QUIET) || $(call green,Linking and optimizing binary,...,\n)
-	@$(VERBOSE) || printf "$(CXX) -o $(TARGETDIR)/btop $^ $(LDFLAGS)\n"
-	@$(CXX) -o $(TARGETDIR)/btop $^ $(LDFLAGS) || exit 1
-	@$(call green,100% -> $(call file_with_size,$(TARGETDIR)/btop,$(call CUR_LEFT,100)$(call CUR_RIGHT,38)) $(GREEN)($(WHITE)$(call step_duration,$$TSTAMP)$(GREEN)))
+	@$(VERBOSE) || printf "$(CXX) -o $(TARGETDIR)/pmtop $^ $(LDFLAGS)\n"
+	@$(CXX) -o $(TARGETDIR)/pmtop $^ $(LDFLAGS) || exit 1
+	@ln -sf pmtop $(TARGETDIR)/btop
+	@$(call green,100% -> $(call file_with_size,$(TARGETDIR)/pmtop,$(call CUR_LEFT,100)$(call CUR_RIGHT,38)) $(GREEN)($(WHITE)$(call step_duration,$$TSTAMP)$(GREEN)))
 	@$(call green,Build complete in $(GREEN)($(WHITE)$(call step_duration,$(TIMESTAMP))$(GREEN)),,\n)
+
+pmtop: btop
 
 #? Compile
 .ONESHELL:
