@@ -371,6 +371,40 @@ namespace UserCgroup {
 		}
 		return false;
 	}
+
+	static bool get_net_usage(uint64_t& out_ingress, uint64_t& out_egress) {
+		init();
+		if (cached_uid <= 0) return false;
+		std::string cmd = "systemctl show user-" + std::to_string(cached_uid) + ".slice -p IPIngressBytes -p IPEgressBytes 2>/dev/null";
+		FILE* fp = popen(cmd.c_str(), "r");
+		if (!fp) return false;
+		char buf[256];
+		bool got_in = false, got_eg = false;
+		while (fgets(buf, sizeof(buf), fp)) {
+			std::string_view line(buf);
+			while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+				line.remove_suffix(1);
+			if (line.starts_with("IPIngressBytes=")) {
+				auto val_str = line.substr(15);
+				uint64_t v = 0;
+				auto [p, ec] = std::from_chars(val_str.data(), val_str.data() + val_str.size(), v);
+				if (ec == std::errc() && v != std::numeric_limits<uint64_t>::max()) {
+					out_ingress = v;
+					got_in = true;
+				}
+			} else if (line.starts_with("IPEgressBytes=")) {
+				auto val_str = line.substr(14);
+				uint64_t v = 0;
+				auto [p, ec] = std::from_chars(val_str.data(), val_str.data() + val_str.size(), v);
+				if (ec == std::errc() && v != std::numeric_limits<uint64_t>::max()) {
+					out_egress = v;
+					got_eg = true;
+				}
+			}
+		}
+		pclose(fp);
+		return (got_in && got_eg);
+	}
 }
 
 namespace Cpu {
@@ -3279,32 +3313,50 @@ namespace Net {
 				} //else, ignoring family==AF_PACKET (see man 3 getifaddrs) which is the first one in the `for` loop.
 			}
 
+			uint64_t u_in = 0, u_eg = 0;
+			bool got_user_net = Config::getB("user_mode") and UserCgroup::get_net_usage(u_in, u_eg);
+			if (got_user_net) {
+				const string u_iface = "user";
+				if (not v_contains(interfaces, u_iface)) {
+					interfaces.insert(interfaces.begin(), u_iface);
+				}
+				net[u_iface].connected = true;
+				if (net[u_iface].ipv4.empty()) net[u_iface].ipv4 = "user.slice";
+			}
+
 			//? Get total received and transmitted bytes + device address if no ip was found
 			for (const auto& iface : interfaces) {
 				auto& netif = net.at(iface);
 				if (netif.ipv4.empty() and netif.ipv6.empty())
-					netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+					netif.ipv4 = (iface == "user") ? "user.slice" : readfile("/sys/class/net/" + iface + "/address");
 
 				for (const string dir : {"download", "upload"}) {
-					const fs::path sys_file = "/sys/class/net/" + iface + "/statistics/" + (dir == "download" ? "rx_bytes" : "tx_bytes");
+					uint64_t val{};
+					if (iface == "user") {
+						val = (dir == "download") ? u_in : u_eg;
+					} else {
+						const fs::path sys_file = "/sys/class/net/" + iface + "/statistics/" + (dir == "download" ? "rx_bytes" : "tx_bytes");
+						try { val = stoull(readfile(sys_file, "0")); }
+						catch (const std::invalid_argument&) {}
+						catch (const std::out_of_range&) {}
+					}
 					auto& saved_stat = netif.stat.at(dir);
 					auto& bandwidth = netif.bandwidth.at(dir);
-
-					uint64_t val{};
-					try { val = stoull(readfile(sys_file, "0")); }
-					catch (const std::invalid_argument&) {}
-					catch (const std::out_of_range&) {}
 
 					//? Update speed, total and top values
 					if (val < saved_stat.last) {
 						saved_stat.rollover += saved_stat.last;
-						saved_stat.last = 0;
+						saved_stat.last = val;
+						saved_stat.speed = 0;
+					} else if (saved_stat.last > 0 and timestamp > 0 and new_timestamp > timestamp) {
+						saved_stat.speed = round((double)(val - saved_stat.last) / ((double)(new_timestamp - timestamp) / 1000));
+					} else {
+						saved_stat.speed = 0;
 					}
 					if (cmp_greater((unsigned long long)saved_stat.rollover + (unsigned long long)val, numeric_limits<uint64_t>::max())) {
 						saved_stat.rollover = 0;
 						saved_stat.last = 0;
 					}
-					saved_stat.speed = round((double)(val - saved_stat.last) / ((double)(new_timestamp - timestamp) / 1000));
 					if (saved_stat.speed > saved_stat.top) saved_stat.top = saved_stat.speed;
 					if (saved_stat.offset > val + saved_stat.rollover) saved_stat.offset = 0;
 					saved_stat.total = (val + saved_stat.rollover) - saved_stat.offset;
@@ -3353,6 +3405,7 @@ namespace Net {
 			redraw = true;
 			if (net_auto) rescale = true;
 			if (not config_iface.empty() and v_contains(interfaces, config_iface)) selected_iface = config_iface;
+			else if (Config::getB("user_mode") and v_contains(interfaces, "user"s)) selected_iface = "user";
 			else {
 				//? Sort interfaces by total upload + download bytes
 				auto sorted_interfaces = interfaces;
