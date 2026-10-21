@@ -321,8 +321,6 @@ help:
 	@printf "  clean        Remove built objects\n"
 	@printf "  distclean    Remove built objects and binaries\n"
 	@printf "  install      Install btop++ to \$$PREFIX ($(PREFIX))\n"
-	@printf "  setcap       Set extended capabilities on binary (preferable to setuid)\n"
-	@printf "  setuid       Set installed binary owner/group to \$$SU_USER/\$$SU_GROUP ($(SU_USER)/$(SU_GROUP)) and set SUID bit\n"
 	@printf "  uninstall    Uninstall btop++ from \$$PREFIX\n"
 	@printf "  info         Display information about Environment,compiler and linker flags\n"
 
@@ -387,20 +385,6 @@ ifneq ($(wildcard btop.1),)
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
 	@cp -p btop.1 $(DESTDIR)$(PREFIX)/share/man/man1/btop.1
 endif
-
-#? Set SUID bit for btop as $SU_USER in $SU_GROUP
-setuid:
-	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/pmtop)
-	@$(call green,Setting owner ,$(WHITE)$(SU_USER):$(SU_GROUP))
-	@chown $(SU_USER):$(SU_GROUP) $(DESTDIR)$(PREFIX)/bin/pmtop
-	@$(call green,Setting SUID bit)
-	@chmod u+s $(DESTDIR)$(PREFIX)/bin/pmtop
-
-#? Run setcap on btop for extended capabilities
-setcap:
-	@$(call white,File: $(DESTDIR)$(PREFIX)/bin/pmtop)
-	@$(call green,Setting capabilities,...)
-	@setcap "cap_perfmon=+ep cap_dac_read_search=+ep" $(DESTDIR)$(PREFIX)/bin/pmtop
 
 # With 'rm -v' user will see what files (if any) got removed
 uninstall:

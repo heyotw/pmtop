@@ -375,7 +375,7 @@ namespace UserCgroup {
 	static bool get_net_usage(uint64_t& out_ingress, uint64_t& out_egress) {
 		init();
 		if (cached_uid <= 0) return false;
-		std::string cmd = "systemctl show user-" + std::to_string(cached_uid) + ".slice -p IPIngressBytes -p IPEgressBytes 2>/dev/null";
+		std::string cmd = "/usr/bin/systemctl show user-" + std::to_string(cached_uid) + ".slice -p IPIngressBytes -p IPEgressBytes 2>/dev/null";
 		FILE* fp = popen(cmd.c_str(), "r");
 		if (!fp) return false;
 		char buf[256];

@@ -63,15 +63,42 @@ ARCH="$(uname -m)"
 
 # Fast Path: Install prebuilt static binary if on x86_64
 if [ "$ARCH" = "x86_64" ]; then
-	RELEASE_URL="https://github.com/heyotw/pmtop/releases/download/v1.4.7-pm1/pmtop-x86_64-linux"
-	echo "Fetching prebuilt static binary for x86_64..."
+	BASE_URL="https://github.com/heyotw/pmtop/releases/download/v1.4.7-pm1"
+	RELEASE_URL="${BASE_URL}/pmtop-x86_64-linux"
+	SHA_URL="${BASE_URL}/pmtop-x86_64-linux.sha256"
+	echo "Fetching prebuilt static binary and SHA256 checksum for x86_64..."
 	TMPBIN="$(mktemp "${BINDIR}/.pmtop.XXXXXX")"
-	if curl -fsSL -o "$TMPBIN" "$RELEASE_URL" 2>/dev/null && chmod +x "$TMPBIN" && "$TMPBIN" --version >/dev/null 2>&1; then
-		mv -f "$TMPBIN" "${BINDIR}/pmtop"
-		INSTALLED=1
-		echo "Prebuilt binary verified."
+	TMPSHA="$(mktemp "${BINDIR}/.pmtop_sha.XXXXXX")"
+
+	if curl -fsSL -o "$TMPBIN" "$RELEASE_URL" 2>/dev/null && \
+	   curl -fsSL -o "$TMPSHA" "$SHA_URL" 2>/dev/null; then
+		EXPECTED_SHA="$(awk '{print $1}' "$TMPSHA" | tr -d '[:space:]')"
+		if command -v sha256sum >/dev/null 2>&1; then
+			ACTUAL_SHA="$(sha256sum "$TMPBIN" | awk '{print $1}')"
+		elif command -v shasum >/dev/null 2>&1; then
+			ACTUAL_SHA="$(shasum -a 256 "$TMPBIN" | awk '{print $1}')"
+		else
+			ACTUAL_SHA=""
+		fi
+
+		if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ]; then
+			echo "SHA256 checksum verified ($ACTUAL_SHA)."
+			chmod +x "$TMPBIN"
+			if "$TMPBIN" --version >/dev/null 2>&1; then
+				mv -f "$TMPBIN" "${BINDIR}/pmtop"
+				rm -f "$TMPSHA"
+				INSTALLED=1
+				echo "Prebuilt binary verified."
+			else
+				rm -f "$TMPBIN" "$TMPSHA"
+				echo "Prebuilt binary execution failed. Falling back to build from source..."
+			fi
+		else
+			echo "Warning: Checksum verification failed (expected $EXPECTED_SHA, got $ACTUAL_SHA). Refusing to execute." >&2
+			rm -f "$TMPBIN" "$TMPSHA"
+		fi
 	else
-		rm -f "$TMPBIN"
+		rm -f "$TMPBIN" "$TMPSHA"
 		echo "Prebuilt binary download failed or skipped. Falling back to build from source..."
 	fi
 fi
